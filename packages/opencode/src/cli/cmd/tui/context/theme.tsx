@@ -85,14 +85,14 @@ type Variant = {
   dark: HexColor | RefName
   light: HexColor | RefName
 }
-type ColorValue = HexColor | RefName | Variant
+type ColorValue = HexColor | RefName | Variant | RGBA
 type ThemeJson = {
   $schema?: string
   defs?: Record<string, HexColor | RefName>
   theme: Record<keyof Theme, ColorValue>
 }
 
-export const THEMES: Record<string, ThemeJson> = {
+export const BUILTIN_THEMES: Record<string, ThemeJson> = {
   aura,
   ayu,
   catppuccin,
@@ -120,6 +120,7 @@ export const THEMES: Record<string, ThemeJson> = {
 function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
   const defs = theme.defs ?? {}
   function resolveColor(c: ColorValue): RGBA {
+    if (c instanceof RGBA) return c
     if (typeof c === "string") return c.startsWith("#") ? RGBA.fromHex(c) : resolveColor(defs[c])
     return resolveColor(c[mode])
   }
@@ -130,17 +131,167 @@ function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
   ) as Theme
 }
 
+// Generate grayscale colors based on terminal background (matches Go implementation)
+function generateGrayScale(terminalBg: RGBA, isDark: boolean): RGBA[] {
+  const grays: RGBA[] = []
+
+  const bgR = terminalBg.r
+  const bgG = terminalBg.g
+  const bgB = terminalBg.b
+
+  const luminance = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB
+
+  for (let i = 1; i <= 12; i++) {
+    const factor = i / 12.0
+    let stepColor: RGBA
+
+    if (isDark) {
+      if (luminance < 10) {
+        // Very dark/black background
+        const grayValue = Math.floor(factor * 0.4 * 255)
+        stepColor = RGBA.fromInts(grayValue, grayValue, grayValue, 255)
+      } else {
+        // Scale up for lighter dark backgrounds
+        const newLum = luminance + (255 - luminance) * factor * 0.4
+        const ratio = newLum / luminance
+        const newR = Math.min(bgR * ratio, 255)
+        const newG = Math.min(bgG * ratio, 255)
+        const newB = Math.min(bgB * ratio, 255)
+        stepColor = RGBA.fromInts(newR, newG, newB, 255)
+      }
+    } else {
+      if (luminance > 245) {
+        // Very light/white background
+        const grayValue = Math.floor(255 - factor * 0.4 * 255)
+        stepColor = RGBA.fromInts(grayValue, grayValue, grayValue, 255)
+      } else {
+        // Scale down for darker light backgrounds
+        const newLum = luminance * (1 - factor * 0.4)
+        const ratio = newLum / luminance
+        const newR = Math.max(bgR * ratio, 0)
+        const newG = Math.max(bgG * ratio, 0)
+        const newB = Math.max(bgB * ratio, 0)
+        stepColor = RGBA.fromInts(newR, newG, newB, 255)
+      }
+    }
+
+    grays.push(stepColor)
+  }
+
+  return grays
+}
+
+// Generate muted text color based on terminal background
+function generateMutedTextColor(terminalBg: RGBA, isDark: boolean): RGBA {
+  const bgLum = 0.299 * terminalBg.r + 0.587 * terminalBg.g + 0.114 * terminalBg.b
+
+  let grayValue: number
+  if (isDark) {
+    if (bgLum < 10) {
+      // Very dark/black background
+      grayValue = 180 // #b4b4b4
+    } else {
+      // Scale up for lighter dark backgrounds
+      grayValue = Math.min(Math.floor(160 + bgLum * 0.3), 200)
+    }
+  } else {
+    if (bgLum > 245) {
+      // Very light/white background
+      grayValue = 75 // #4b4b4b
+    } else {
+      // Scale down for darker light backgrounds
+      grayValue = Math.max(Math.floor(100 - (255 - bgLum) * 0.2), 60)
+    }
+  }
+
+  return RGBA.fromInts(grayValue, grayValue, grayValue, 255)
+}
+
+function generateSystem(colors: string[], isDark: boolean): ThemeJson {
+  const background = colors[0]
+  const grays = generateGrayScale(RGBA.fromHex(background), isDark)
+  const mutedTextColor = generateMutedTextColor(RGBA.fromHex(background), isDark)
+
+  return {
+    theme: {
+      // Primary/Brand colors - ANSI 6 (Cyan) and 5 (Magenta)
+      primary: colors[6],
+      secondary: colors[5],
+      accent: colors[6],
+      // Status colors
+      error: colors[1], // ANSI 1 (Red)
+      warning: colors[3], // ANSI 3 (Yellow)
+      success: colors[2], // ANSI 2 (Green)
+      info: colors[6], // ANSI 6 (Cyan)
+      // Text colors - use terminal default
+      text: colors[7],
+      textMuted: colors[7],
+      // Background colors - use terminal default and generated grays
+      background: colors[0],
+      backgroundPanel: grays[1], // grays[2] in Go (1-indexed)
+      backgroundElement: grays[2], // grays[3] in Go (1-indexed)
+      // Border colors
+      border: grays[6], // grays[7] in Go (1-indexed)
+      borderActive: grays[7], // grays[8] in Go (1-indexed)
+      borderSubtle: grays[5], // grays[6] in Go (1-indexed)
+      // Diff colors
+      diffAdded: colors[2], // ANSI 2 (Green)
+      diffRemoved: colors[1], // ANSI 1 (Red)
+      diffContext: grays[6], // grays[7] in Go (1-indexed)
+      diffHunkHeader: grays[6], // grays[7] in Go (1-indexed)
+      diffHighlightAdded: colors[2], // ANSI 2 (Green)
+      diffHighlightRemoved: colors[1], // ANSI 1 (Red)
+      diffAddedBg: grays[0], // grays[2] in Go (1-indexed)
+      diffRemovedBg: grays[0], // grays[2] in Go (1-indexed)
+      diffContextBg: grays[0], // grays[1] in Go (1-indexed)
+      diffLineNumber: grays[5], // grays[6] in Go (1-indexed)
+      diffAddedLineNumberBg: grays[2], // grays[3] in Go (1-indexed)
+      diffRemovedLineNumberBg: grays[2], // grays[3] in Go (1-indexed)
+      // Markdown colors
+      markdownText: colors[7],
+      markdownHeading: colors[7],
+      markdownLink: colors[4], // ANSI 4 (Blue)
+      markdownLinkText: colors[6], // ANSI 6 (Cyan)
+      markdownCode: colors[2], // ANSI 2 (Green)
+      markdownBlockQuote: colors[3], // ANSI 3 (Yellow)
+      markdownEmph: colors[3], // ANSI 3 (Yellow)
+      markdownStrong: colors[7],
+      markdownHorizontalRule: grays[6], // grays[7] in Go (1-indexed)
+      markdownListItem: colors[4], // ANSI 4 (Blue)
+      markdownListEnumeration: colors[6], // ANSI 6 (Cyan)
+      markdownImage: colors[4], // ANSI 4 (Blue)
+      markdownImageText: colors[6], // ANSI 6 (Cyan)
+      markdownCodeBlock: colors[7],
+      // Syntax highlighting
+      syntaxComment: mutedTextColor,
+      syntaxKeyword: colors[5], // ANSI 5 (Magenta)
+      syntaxFunction: colors[4], // ANSI 4 (Blue)
+      syntaxVariable: colors[7],
+      syntaxString: colors[2], // ANSI 2 (Green)
+      syntaxNumber: colors[3], // ANSI 3 (Yellow)
+      syntaxType: colors[6], // ANSI 6 (Cyan)
+      syntaxOperator: colors[6], // ANSI 6 (Cyan)
+      syntaxPunctuation: colors[7],
+    },
+  }
+}
+
 export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
   name: "Theme",
-  init: (props: { mode: "dark" | "light" }) => {
+  init: (props: { mode: "dark" | "light"; system: string[] }) => {
     const sync = useSync()
     const kv = useKV()
+
+    const themes: Record<string, ThemeJson> = {
+      ...BUILTIN_THEMES,
+      system: generateSystem(props.system, props.mode === "dark"),
+    }
 
     const [theme, setTheme] = createSignal(sync.data.config.theme ?? kv.get("theme", "opencode"))
     const [mode, setMode] = createSignal(props.mode)
 
     const values = createMemo(() => {
-      return resolveTheme(THEMES[theme()] ?? THEMES.opencode, mode())
+      return resolveTheme(themes[theme()] ?? BUILTIN_THEMES.opencode, mode())
     })
 
     const syntax = createMemo(() => {
@@ -659,8 +810,11 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
       setMode(mode: "dark" | "light") {
         setMode(mode)
       },
+      get all() {
+        return themes
+      },
       set(theme: string) {
-        if (!THEMES[theme]) return
+        if (!themes[theme]) return
         setTheme(theme)
         kv.set("theme", theme)
       },
